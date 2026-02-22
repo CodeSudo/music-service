@@ -5,6 +5,18 @@ import YTMusic from 'ytmusic-api';
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
+// 1. THIS IS THE NEW BLOCK: It handles the CORS "Preflight" check
+export async function OPTIONS(request) {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*', 
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
+  });
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const videoId = searchParams.get('videoId');
@@ -18,7 +30,12 @@ export async function GET(request) {
   // Handle Search
   if (query) {
     const results = await ytmusic.searchSongs(query);
-    return NextResponse.json(results);
+    // 2. UPDATED: We added the CORS header to the search response
+    return NextResponse.json(results, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
   }
 
   // Handle Streaming Proxy
@@ -63,11 +80,16 @@ export async function GET(request) {
         headers: {
           'Content-Type': 'audio/mpeg',
           'Transfer-Encoding': 'chunked',
+          // 3. UPDATED: We added the CORS header to the audio stream too
+          'Access-Control-Allow-Origin': '*',
         },
       });
     } catch (err) {
       console.error(err);
-      return NextResponse.json({ error: "Streaming failed" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Streaming failed" }, 
+        { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } }
+      );
     }
   }
 }
