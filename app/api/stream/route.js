@@ -5,7 +5,7 @@ import YTMusic from 'ytmusic-api';
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
-// 1. CORS Preflight Handler
+// 1. THIS IS THE NEW BLOCK: It handles the CORS "Preflight" check
 export async function OPTIONS(request) {
   return new NextResponse(null, {
     status: 204,
@@ -22,45 +22,28 @@ export async function GET(request) {
   const videoId = searchParams.get('videoId');
   const query = searchParams.get('query');
 
-  // Lazy initialization of YTMusic
   if (!isInitialized) {
     await ytmusic.initialize();
     isInitialized = true;
   }
 
-  // 🚀 HYBRID SEARCH: Handles "Jhol" and other video-only tracks
+  // Handle Search
   if (query) {
-    try {
-      // Use general search to find both Songs and Videos
-      const allResults = await ytmusic.search(query); 
-
-      // M.Tech Optimization: Filter, Limit to 10, and Shape the data
-      const filteredResults = allResults
-        .filter(item => item.type === 'SONG' || item.type === 'VIDEO')
-        .slice(0, 10) // Limit payload size for Vercel performance
-        .map(item => ({
-          videoId: item.videoId,
-          name: item.name,
-          artists: item.artists,
-          thumbnails: item.thumbnails,
-          type: item.type // Passed to frontend for the [SONG/VIDEO] Badge
-        }));
-
-      return NextResponse.json(filteredResults, {
-        headers: { 'Access-Control-Allow-Origin': '*' }
-      });
-    } catch (err) {
-      console.error("Search Error:", err);
-      return NextResponse.json({ error: "Search failed" }, { status: 500 });
-    }
+    const results = await ytmusic.searchSongs(query);
+    // 2. UPDATED: We added the CORS header to the search response
+    return NextResponse.json(results, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
   }
 
-  // Handle Streaming Proxy (Note: For videos like "Jhol", IFrame playback is recommended 
-  // over this proxy method to avoid Vercel 4.5MB payload limits)
+  // Handle Streaming Proxy
   if (videoId) {
     try {
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
       
+      // 1. Get stream info
       const info = await ytdl.getInfo(videoUrl, {
         requestOptions: {
           headers: {
@@ -70,8 +53,10 @@ export async function GET(request) {
         }
       });
 
+      // 2. Select audio format
       const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
 
+      // 3. Create a Node.js PassThrough stream to bridge ytdl and NextResponse
       const audioStream = ytdl(videoUrl, {
         format: format,
         requestOptions: {
@@ -79,6 +64,7 @@ export async function GET(request) {
         }
       });
 
+      // 4. Return as a standard Web Stream
       const readableStream = new ReadableStream({
         start(controller) {
           audioStream.on('data', (chunk) => controller.enqueue(chunk));
@@ -94,6 +80,7 @@ export async function GET(request) {
         headers: {
           'Content-Type': 'audio/mpeg',
           'Transfer-Encoding': 'chunked',
+          // 3. UPDATED: We added the CORS header to the audio stream too
           'Access-Control-Allow-Origin': '*',
         },
       });
