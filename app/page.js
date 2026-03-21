@@ -22,17 +22,31 @@ export default function MusicPlayer() {
       width: '0',
       videoId: videoId,
       playerVars: { 'autoplay': 1, 'controls': 0, 'origin': window.location.origin },
-      events: {
-        'onReady': (event) => {
-          if (videoId) event.target.playVideo();
-        },
-        'onStateChange': (event) => {
-          // Clear watchdog if song actually starts playing
-          if (event.data === window.YT.PlayerState.PLAYING) {
-            clearTimeout(watchdogRef.current);
-          }
-          // Handle Auto-Next
-          if (event.data === window.YT.PlayerState.ENDED) {
+events: {
+  'onStateChange': (event) => {
+    // State 3 is BUFFERING
+    if (event.data === window.YT.PlayerState.BUFFERING) {
+      // If it buffers for more than 5s, it might be a silent freeze
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = setTimeout(() => {
+        if (playerRef.current.getPlayerState() === 3) {
+          console.warn("Buffer timeout - Re-triggering Play");
+          playerRef.current.playVideo(); // Force play
+        }
+      }, 5000);
+    }
+
+    if (event.data === window.YT.PlayerState.PLAYING) {
+      clearTimeout(watchdogRef.current);
+      console.log("Track started successfully!");
+    }
+
+    if (event.data === window.YT.PlayerState.ENDED) {
+      handleAutoNext();
+    }
+  },
+  'onError': (event) => {
+    console.error("Player Error Code:", event.data);
             handleAutoNext();
           }
         },
