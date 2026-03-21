@@ -7,57 +7,11 @@ export default function MusicPlayer() {
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
+  
   const playerRef = useRef(null);
   const watchdogRef = useRef(null);
 
-  // 1. Function to (Re)Initialize the Player
-  const initPlayer = (videoId = '') => {
-    // If player exists, destroy it to clear memory leaks
-    if (playerRef.current && typeof playerRef.current.destroy === 'function') {
-      try { playerRef.current.destroy(); } catch (e) {}
-    }
-
-    playerRef.current = new window.YT.Player('hidden-player', {
-      height: '0',
-      width: '0',
-      videoId: videoId,
-      playerVars: { 'autoplay': 1, 'controls': 0, 'origin': window.location.origin },
-events: {
-  'onStateChange': (event) => {
-    // State 3 is BUFFERING
-    if (event.data === window.YT.PlayerState.BUFFERING) {
-      // If it buffers for more than 5s, it might be a silent freeze
-      clearTimeout(watchdogRef.current);
-      watchdogRef.current = setTimeout(() => {
-        if (playerRef.current.getPlayerState() === 3) {
-          console.warn("Buffer timeout - Re-triggering Play");
-          playerRef.current.playVideo(); // Force play
-        }
-      }, 5000);
-    }
-
-    if (event.data === window.YT.PlayerState.PLAYING) {
-      clearTimeout(watchdogRef.current);
-      console.log("Track started successfully!");
-    }
-
-    if (event.data === window.YT.PlayerState.ENDED) {
-      handleAutoNext();
-    }
-  },
-  'onError': (event) => {
-    console.error("Player Error Code:", event.data);
-            handleAutoNext();
-          }
-        },
-        'onError': () => {
-          console.log("Player Error - Attempting Reset...");
-          handleFreezeReset();
-        }
-      }
-    });
-  };
-
+  // 1. Initialize Player with "Ghost" visibility for Heartbeat success
   useEffect(() => {
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -65,15 +19,37 @@ events: {
       const firstScriptTag = document.getElementsByTagName('script')[0];
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
     }
-    window.onYouTubeIframeAPIReady = () => initPlayer();
-  }, []);
 
-  // 2. The "Freeze Reset" Logic
-  const handleFreezeReset = (targetIndex, currentQueue) => {
-    console.warn("Freeze detected. Re-initializing player...");
-    const song = currentQueue[targetIndex];
-    initPlayer(song.videoId);
-  };
+    window.onYouTubeIframeAPIReady = () => {
+      playerRef.current = new window.YT.Player('hidden-player', {
+        height: '2',
+        width: '2',
+        videoId: '',
+        playerVars: { 
+          'autoplay': 1, 
+          'controls': 0,
+          'enablejsapi': 1,
+          'origin': window.location.origin 
+        },
+        events: {
+          'onStateChange': (event) => {
+            // Clear watchdog if track starts playing
+            if (event.data === window.YT.PlayerState.PLAYING) {
+              clearTimeout(watchdogRef.current);
+            }
+            // Auto-next on end
+            if (event.data === window.YT.PlayerState.ENDED) {
+              handleAutoNext();
+            }
+          },
+          'onError': (event) => {
+            console.error("Player Error:", event.data);
+            handleAutoNext(); // Skip restricted tracks (Error 150/101)
+          }
+        }
+      });
+    };
+  }, []);
 
   const search = async () => {
     if (!query) return;
@@ -94,38 +70,36 @@ events: {
       const song = currentQueue[index];
       setCurrentIndex(index);
 
-      // Start Watchdog: If song doesn't play in 3s, reset the player
+      // Watchdog: If "Jhol" or others freeze, reset after 5s
       clearTimeout(watchdogRef.current);
       watchdogRef.current = setTimeout(() => {
-        handleFreezeReset(index, currentQueue);
-      }, 3000);
+        if (playerRef.current?.getPlayerState() !== 1) {
+          console.warn("Freeze detected, re-triggering...");
+          playerRef.current?.loadVideoById(song.videoId);
+        }
+      }, 5000);
 
-      if (playerRef.current && playerRef.current.loadVideoById) {
+      if (playerRef.current?.loadVideoById) {
         playerRef.current.loadVideoById(song.videoId);
-        playerRef.current.playVideo();
-      } else {
-        initPlayer(song.videoId);
       }
     }
   };
 
   const handleAutoNext = () => {
-    setQueue((prevQueue) => {
-      setCurrentIndex((prevIndex) => {
-        const nextIndex = prevIndex + 1;
-        if (nextIndex < prevQueue.length) {
-          playFromQueue(nextIndex, prevQueue);
-          return nextIndex;
-        }
-        return prevIndex;
-      });
-      return prevQueue;
+    setQueue((prev) => {
+      const nextIndex = currentIndex + 1;
+      if (nextIndex < prev.length) {
+        playFromQueue(nextIndex, prev);
+        setCurrentIndex(nextIndex);
+      }
+      return prev;
     });
   };
 
   const instantPlay = (song) => {
     const newQueue = [song];
     setQueue(newQueue);
+    setCurrentIndex(0);
     playFromQueue(0, newQueue);
   };
 
@@ -133,6 +107,7 @@ events: {
     setQueue((prev) => {
       const newQueue = [...prev, song];
       if (currentIndex === -1) {
+        setCurrentIndex(0);
         playFromQueue(0, newQueue);
       }
       return newQueue;
@@ -140,46 +115,57 @@ events: {
   };
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '600px', margin: 'auto', background: '#111', color: '#fff', minHeight: '100vh' }}>
-      <h1>🎵 Stable Stream</h1>
-      {/* Container must stay visible for initPlayer to find it, but 0px size */}
-      <div id="hidden-player" style={{ position: 'absolute', top: '-1000px' }}></div>
+    <div style={{ padding: '2rem', maxWidth: '600px', margin: 'auto', background: '#0a0a0a', color: '#fff', minHeight: '100vh', fontFamily: 'sans-serif' }}>
+      <h1 style={{ textAlign: 'center', color: '#1db954' }}>🎵 Stable Stream Pro</h1>
+      
+      {/* 🚀 GHOST PLAYER: Technically visible to YouTube but hidden from user */}
+      <div id="hidden-player" style={{ position: 'fixed', bottom: '-10px', right: '-10px', opacity: 0.01, zIndex: -1 }}></div>
 
-      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '30px' }}>
         <input 
           value={query} 
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && search()}
-          placeholder="Search..."
-          style={{ flex: 1, padding: '10px', borderRadius: '8px', color: '#000' }}
+          placeholder="Search songs or videos..."
+          style={{ flex: 1, padding: '12px', borderRadius: '25px', border: 'none', background: '#222', color: '#fff' }}
         />
-        <button onClick={search} disabled={loading}>{loading ? '...' : 'Search'}</button>
+        <button onClick={search} style={{ background: '#1db954', border: 'none', borderRadius: '25px', padding: '0 20px', cursor: 'pointer', fontWeight: 'bold' }}>
+          {loading ? '...' : 'Search'}
+        </button>
       </div>
 
+      {/* PLAYER CONTROLS */}
       {currentIndex !== -1 && queue[currentIndex] && (
-        <div style={{ background: '#333', padding: '15px', borderRadius: '12px', marginBottom: '20px', border: '1px solid #1db954' }}>
-          <p><strong>Playing:</strong> {queue[currentIndex].name}</p>
-          <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-            <button onClick={() => playerRef.current?.pauseVideo()}>Pause</button>
-            <button onClick={() => playerRef.current?.playVideo()}>Play</button>
-            <button onClick={handleAutoNext}>Skip</button>
-            <button onClick={() => { setQueue([]); setCurrentIndex(-1); playerRef.current?.stopVideo(); }} style={{ background: '#ff4444', color: '#fff', border: 'none', borderRadius: '4px' }}>Clear</button>
+        <div style={{ background: '#181818', padding: '20px', borderRadius: '15px', marginBottom: '25px', border: '1px solid #333' }}>
+          <p style={{ margin: '0 0 10px 0', fontSize: '0.9rem', color: '#1db954' }}>Now Playing</p>
+          <div style={{ fontWeight: 'bold', fontSize: '1.1rem', marginBottom: '15px' }}>{queue[currentIndex].name}</div>
+          <div style={{ display: 'flex', gap: '15px' }}>
+            <button onClick={() => playerRef.current?.pauseVideo()} style={{ flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Pause</button>
+            <button onClick={() => playerRef.current?.playVideo()} style={{ flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Play</button>
+            <button onClick={handleAutoNext} style={{ flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Skip</button>
+            <button onClick={() => { setQueue([]); setCurrentIndex(-1); playerRef.current?.stopVideo(); }} style={{ padding: '10px', background: '#b91d1d', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer' }}>Clear</button>
           </div>
         </div>
       )}
 
+      {/* RESULTS LIST */}
       <ul style={{ listStyle: 'none', padding: 0 }}>
         {results.map((song) => (
-          <li key={song.videoId} 
-              style={{ padding: '10px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div onClick={() => instantPlay(song)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-              <img src={song.thumbnails?.[0]?.url} width="40" height="40" style={{ borderRadius: '4px' }} alt="" />
+          <li key={song.videoId} style={{ padding: '12px', borderBottom: '1px solid #222', display: 'flex', alignItems: 'center', gap: '15px' }}>
+            <div onClick={() => instantPlay(song)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }}>
+              <img src={song.thumbnails?.[0]?.url} width="50" height="50" style={{ borderRadius: '8px' }} alt="" />
               <div>
-                <div style={{ fontWeight: 'bold' }}>{song.name}</div>
-                <div style={{ fontSize: '0.8rem', color: '#aaa' }}>{song.artists?.[0]?.name}</div>
+                <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {song.name}
+                  {/* TYPE BADGE */}
+                  <span style={{ fontSize: '9px', padding: '2px 6px', borderRadius: '4px', background: song.type === 'VIDEO' ? '#ff0000' : '#1db954' }}>
+                    {song.type}
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.8rem', color: '#888' }}>{song.artists?.[0]?.name}</div>
               </div>
             </div>
-            <button onClick={() => addToQueue(song)} style={{ padding: '5px 10px', background: '#1db954', color: '#fff', border: 'none', borderRadius: '4px' }}>+ Queue</button>
+            <button onClick={() => addToQueue(song)} style={{ padding: '8px 12px', background: '#333', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer' }}>+ Queue</button>
           </li>
         ))}
       </ul>
