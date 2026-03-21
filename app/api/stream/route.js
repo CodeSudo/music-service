@@ -5,14 +5,13 @@ import YTMusic from 'ytmusic-api';
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
-// 1. THIS IS THE NEW BLOCK: It handles the CORS "Preflight" check
-export async function OPTIONS(request) {
+export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
     headers: {
-      'Access-Control-Allow-Origin': '*', 
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
     },
   });
 }
@@ -27,44 +26,61 @@ export async function GET(request) {
     isInitialized = true;
   }
 
-  // Handle Search
+  // 1. Optimized Hybrid Search
   if (query) {
-    const results = await ytmusic.searchSongs(query);
-    // 2. UPDATED: We added the CORS header to the search response
-    return NextResponse.json(results, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-      }
-    });
+    try {
+      const allResults = await ytmusic.search(query); 
+      const filtered = allResults
+        .filter(item => item.type === 'SONG' || item.type === 'VIDEO')
+        .slice(0, 10)
+        .map(item => ({
+          videoId: item.videoId,
+          name: item.name,
+          artists: item.artists,
+          thumbnails: item.thumbnails,
+          type: item.type
+        }));
+
+      return NextResponse.json(filtered, { headers: { 'Access-Control-Allow-Origin': '*' } });
+    } catch (err) {
+      return NextResponse.json({ error: "Search failed" }, { status: 500 });
+    }
   }
 
-  // Handle Streaming Proxy
+  // 2. Music-Optimized Streaming Proxy
   if (videoId) {
     try {
-      const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      // 🚀 TARGETING MUSIC INFRASTRUCTURE
+      const musicUrl = `https://music.youtube.com/watch?v=${videoId}`;
       
-      // 1. Get stream info
-      const info = await ytdl.getInfo(videoUrl, {
+      const info = await ytdl.getInfo(musicUrl, {
         requestOptions: {
           headers: {
             cookie: process.env.YT_COOKIES || '',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            // Mimics the YouTube Music Android App for better audio stability
+            'User-Agent': 'com.google.android.apps.youtube.music/5.39.52 (Linux; U; Android 12; en_US)',
+            'x-youtube-client-name': '5',
+            'x-youtube-client-version': '5.39.52'
           }
         }
       });
 
-      // 2. Select audio format
-      const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
+      // Filter for audio-only formats to save Vercel bandwidth
+      const format = ytdl.chooseFormat(info.formats, { 
+        filter: 'audioonly', 
+        quality: 'highestaudio' 
+      });
 
-      // 3. Create a Node.js PassThrough stream to bridge ytdl and NextResponse
-      const audioStream = ytdl(videoUrl, {
+      const audioStream = ytdl(musicUrl, {
         format: format,
         requestOptions: {
-          headers: { cookie: process.env.YT_COOKIES || '' }
+          headers: { 
+            cookie: process.env.YT_COOKIES || '',
+            'Range': 'bytes=0-' // Ensures the stream starts from the beginning
+          }
         }
       });
 
-      // 4. Return as a standard Web Stream
       const readableStream = new ReadableStream({
         start(controller) {
           audioStream.on('data', (chunk) => controller.enqueue(chunk));
@@ -79,17 +95,13 @@ export async function GET(request) {
       return new NextResponse(readableStream, {
         headers: {
           'Content-Type': 'audio/mpeg',
-          'Transfer-Encoding': 'chunked',
-          // 3. UPDATED: We added the CORS header to the audio stream too
           'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache'
         },
       });
     } catch (err) {
       console.error(err);
-      return NextResponse.json(
-        { error: "Streaming failed" }, 
-        { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } }
-      );
+      return NextResponse.json({ error: "Music stream failed" }, { status: 500 });
     }
   }
 }
