@@ -26,12 +26,14 @@ export default function MusicPlayer() {
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Search for a song to start listening.");
   const [playbackError, setPlaybackError] = useState("");
+  const [playbackMode, setPlaybackMode] = useState("idle");
 
   const audioRef = useRef(null);
+  const playerRef = useRef(null);
   const retryTimeoutRef = useRef(null);
   const currentIndexRef = useRef(-1);
   const queueRef = useRef([]);
-  const retryCountRef = useRef({});
+  const iframeFallbackRef = useRef({});
 
   useEffect(() => {
     currentIndexRef.current = currentIndex;
@@ -42,12 +44,70 @@ export default function MusicPlayer() {
   }, [queue]);
 
   useEffect(() => {
+    if (!window.YT) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+    }
+
+    window.onYouTubeIframeAPIReady = () => {
+      if (playerRef.current) {
+        return;
+      }
+
+      playerRef.current = new window.YT.Player("hidden-player", {
+        height: "2",
+        width: "2",
+        videoId: "",
+        playerVars: {
+          autoplay: 1,
+          controls: 0,
+          enablejsapi: 1,
+          origin: window.location.origin,
+        },
+        events: {
+          onStateChange: (event) => {
+            if (event.data === window.YT.PlayerState.PLAYING && playbackMode === "iframe") {
+              setPlaybackError("");
+              setStatusMessage(`Now playing ${queueRef.current[currentIndexRef.current]?.name || ""}`.trim());
+            }
+
+            if (event.data === window.YT.PlayerState.ENDED) {
+              handleAutoNext();
+            }
+          },
+          onError: () => {
+            const activeSong = queueRef.current[currentIndexRef.current];
+            handleAutoNext(`Skipped ${activeSong?.name || "track"} because both stream and fallback playback failed.`);
+          },
+        },
+      });
+    };
+
     return () => {
       clearTimeout(retryTimeoutRef.current);
     };
-  }, []);
+  }, [playbackMode]);
 
   const getSongStreamUrl = (song) => `/api/stream?videoId=${encodeURIComponent(song.videoId)}`;
+
+  const stopIframePlayer = () => {
+    try {
+      playerRef.current?.stopVideo?.();
+    } catch (error) {
+      console.error("Failed to stop iframe player", error);
+    }
+  };
+
+  const stopAudioPlayer = () => {
+    if (!audioRef.current) {
+      return;
+    }
+
+    audioRef.current.pause();
+    audioRef.current.removeAttribute("src");
+    audioRef.current.load();
+  };
 
   const search = async () => {
     if (!query.trim()) {
@@ -66,7 +126,7 @@ export default function MusicPlayer() {
       setStatusMessage(
         nextResults.length
           ? `Found ${nextResults.length} playable result${nextResults.length === 1 ? "" : "s"}.`
-          : "No playable results found for that search."
+          : "No playable results found for that search.",
       );
     } catch (err) {
       console.error("Search failed", err);
@@ -76,7 +136,38 @@ export default function MusicPlayer() {
     }
   };
 
-  const playFromQueue = (index, nextQueue = queueRef.current, attempt = 0) => {
+  const playWithIframeFallback = (song) => {
+    const iframePlayer = playerRef.current;
+
+    if (!iframePlayer?.loadVideoById) {
+      return false;
+    }
+
+    stopAudioPlayer();
+    setPlaybackMode("iframe");
+    setPlaybackError("Stream proxy failed, using YouTube fallback player.");
+    setStatusMessage(`Trying fallback playback for ${song.name}...`);
+    iframePlayer.loadVideoById(song.videoId);
+    return true;
+  };
+
+  const handleAudioFailure = (song, nextQueue) => {
+    if (!song) {
+      return;
+    }
+
+    if (!iframeFallbackRef.current[song.videoId]) {
+      iframeFallbackRef.current[song.videoId] = true;
+      const startedFallback = playWithIframeFallback(song);
+      if (startedFallback) {
+        return;
+      }
+    }
+
+    handleAutoNext(`Skipped ${song.name} because it could not be streamed.`);
+  };
+
+  const playFromQueue = (index, nextQueue = queueRef.current) => {
     const audio = audioRef.current;
     const song = nextQueue[index];
 
@@ -85,11 +176,12 @@ export default function MusicPlayer() {
     }
 
     clearTimeout(retryTimeoutRef.current);
-    retryCountRef.current[song.videoId] = attempt;
-    setPlaybackError("");
     setCurrentIndex(index);
+    setPlaybackMode("audio");
+    setPlaybackError("");
     setStatusMessage(`Loading ${song.name}...`);
 
+    stopIframePlayer();
     audio.pause();
     audio.src = getSongStreamUrl(song);
     audio.load();
@@ -98,22 +190,9 @@ export default function MusicPlayer() {
     if (playPromise?.catch) {
       playPromise.catch((err) => {
         console.error("Playback start failed", err);
-        setPlaybackError("Playback needs another attempt. Retrying automatically...");
-        retryPlayback(song.videoId, index, nextQueue, attempt);
+        handleAudioFailure(song, nextQueue);
       });
     }
-  };
-
-  const retryPlayback = (videoId, index, nextQueue, attempt = 0) => {
-    if (attempt >= 1 || nextQueue[index]?.videoId !== videoId) {
-      handleAutoNext(`Skipped ${nextQueue[index]?.name || "track"} because it could not be streamed.`);
-      return;
-    }
-
-    clearTimeout(retryTimeoutRef.current);
-    retryTimeoutRef.current = setTimeout(() => {
-      playFromQueue(index, nextQueue, attempt + 1);
-    }, 1200);
   };
 
   const handleAutoNext = (message) => {
@@ -132,17 +211,15 @@ export default function MusicPlayer() {
     if (message) {
       setPlaybackError(message);
     }
+    setPlaybackMode("idle");
     setStatusMessage("Queue finished.");
     setCurrentIndex(-1);
-
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute("src");
-      audioRef.current.load();
-    }
+    stopAudioPlayer();
+    stopIframePlayer();
   };
 
   const instantPlay = (song) => {
+    iframeFallbackRef.current = {};
     const newQueue = [song];
     setQueue(newQueue);
     queueRef.current = newQueue;
@@ -156,6 +233,7 @@ export default function MusicPlayer() {
       setStatusMessage(`${song.name} added to queue.`);
 
       if (currentIndexRef.current === -1) {
+        iframeFallbackRef.current = {};
         playFromQueue(0, newQueue);
       }
 
@@ -167,16 +245,14 @@ export default function MusicPlayer() {
     clearTimeout(retryTimeoutRef.current);
     setQueue([]);
     queueRef.current = [];
+    iframeFallbackRef.current = {};
     setCurrentIndex(-1);
     currentIndexRef.current = -1;
     setPlaybackError("");
+    setPlaybackMode("idle");
     setStatusMessage("Queue cleared.");
-
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute("src");
-      audioRef.current.load();
-    }
+    stopAudioPlayer();
+    stopIframePlayer();
   };
 
   const currentSong = currentIndex >= 0 ? queue[currentIndex] : null;
@@ -195,28 +271,29 @@ export default function MusicPlayer() {
     >
       <h1 style={{ textAlign: "center", color: "#1db954" }}>🎵 Stable Stream Pro</h1>
       <p style={{ textAlign: "center", color: "#a7a7a7", marginTop: "-10px", marginBottom: "24px" }}>
-        Search with YouTube Music, then play through your server stream so restricted embeds do not break playback.
+        Search with YouTube Music, then play through the stream proxy with an automatic YouTube fallback when the proxy fails.
       </p>
+
+      <div id="hidden-player" style={{ position: "fixed", bottom: "-10px", right: "-10px", opacity: 0.01, zIndex: -1 }} />
 
       <audio
         ref={audioRef}
         preload="none"
-        onPlaying={() => setStatusMessage(`Now playing ${queueRef.current[currentIndexRef.current]?.name || ""}`.trim())}
+        onPlaying={() => {
+          if (playbackMode === "audio") {
+            setPlaybackError("");
+            setStatusMessage(`Now playing ${queueRef.current[currentIndexRef.current]?.name || ""}`.trim());
+          }
+        }}
         onEnded={() => handleAutoNext()}
         onPause={() => {
-          if (currentIndexRef.current >= 0) {
+          if (playbackMode === "audio" && currentIndexRef.current >= 0) {
             setStatusMessage(`Paused ${queueRef.current[currentIndexRef.current]?.name || "track"}.`);
           }
         }}
         onError={() => {
           const activeSong = queueRef.current[currentIndexRef.current];
-          if (!activeSong) {
-            return;
-          }
-
-          const attempt = retryCountRef.current[activeSong.videoId] || 0;
-          setPlaybackError(`Could not stream ${activeSong.name} on the first attempt. Trying again...`);
-          retryPlayback(activeSong.videoId, currentIndexRef.current, queueRef.current, attempt);
+          handleAudioFailure(activeSong, queueRef.current);
         }}
       />
 
@@ -270,13 +347,34 @@ export default function MusicPlayer() {
               <div style={{ color: "#aaa", fontSize: "0.9rem" }}>
                 {currentSong.artists?.map((artist) => artist.name).join(", ") || "Unknown artist"}
               </div>
+              <div style={{ marginTop: "6px", fontSize: "0.8rem", color: "#7dd3fc" }}>
+                Playback mode: {playbackMode === "iframe" ? "YouTube fallback" : playbackMode === "audio" ? "Stream proxy" : "Idle"}
+              </div>
             </div>
           </div>
           <div style={{ display: "flex", gap: "15px", flexWrap: "wrap" }}>
-            <button onClick={() => audioRef.current?.pause()} style={buttonStyle}>
+            <button
+              onClick={() => {
+                if (playbackMode === "iframe") {
+                  playerRef.current?.pauseVideo?.();
+                } else {
+                  audioRef.current?.pause();
+                }
+              }}
+              style={buttonStyle}
+            >
               Pause
             </button>
-            <button onClick={() => audioRef.current?.play()} style={buttonStyle}>
+            <button
+              onClick={() => {
+                if (playbackMode === "iframe") {
+                  playerRef.current?.playVideo?.();
+                } else {
+                  audioRef.current?.play();
+                }
+              }}
+              style={buttonStyle}
+            >
               Play
             </button>
             <button onClick={() => handleAutoNext()} style={buttonStyle}>
@@ -317,10 +415,7 @@ export default function MusicPlayer() {
               gap: "15px",
             }}
           >
-            <div
-              onClick={() => instantPlay(song)}
-              style={{ flex: 1, display: "flex", alignItems: "center", gap: "12px", cursor: "pointer" }}
-            >
+            <div onClick={() => instantPlay(song)} style={{ flex: 1, display: "flex", alignItems: "center", gap: "12px", cursor: "pointer" }}>
               <img
                 src={song.thumbnails?.[0]?.url}
                 width="50"

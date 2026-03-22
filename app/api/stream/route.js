@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import ytdl from "@distube/ytdl-core";
 import YTMusic from "ytmusic-api";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
@@ -20,10 +23,14 @@ function buildRequestHeaders() {
   return {
     cookie: process.env.YT_COOKIES || "",
     "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1",
     Referer: "https://music.youtube.com/",
     Origin: "https://music.youtube.com",
     "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+    "x-youtube-client-name": "67",
+    "x-youtube-client-version": "1.20260318.00.00",
   };
 }
 
@@ -42,7 +49,7 @@ function choosePlayableAudioFormat(formats) {
 }
 
 function parseRangeHeader(rangeHeader, contentLength) {
-  if (!rangeHeader?.startsWith("bytes=")) {
+  if (!rangeHeader?.startsWith("bytes=") || !contentLength) {
     return null;
   }
 
@@ -81,7 +88,12 @@ export async function GET(request) {
       await ensureInitialized();
       const results = await ytmusic.search(query);
       const filtered = results.filter((item) => item.type === "SONG" || item.type === "VIDEO").slice(0, 10);
-      return NextResponse.json(filtered, { headers: { "Access-Control-Allow-Origin": "*" } });
+      return NextResponse.json(filtered, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      });
     } catch (error) {
       console.error("Search failed", error);
       return NextResponse.json({ error: "Search failed" }, { status: 500 });
@@ -94,10 +106,11 @@ export async function GET(request) {
 
   try {
     const requestHeaders = buildRequestHeaders();
-    const info = await ytdl.getInfo(videoId, {
+    const info = await ytdl.getInfo(`https://music.youtube.com/watch?v=${videoId}`, {
       requestOptions: {
         headers: requestHeaders,
       },
+      playerClients: ["WEB_EMBEDDED", "IOS", "ANDROID", "TV"],
     });
 
     const format = choosePlayableAudioFormat(info.formats);
@@ -114,10 +127,11 @@ export async function GET(request) {
       requestOptions: {
         headers: requestHeaders,
       },
+      playerClients: ["WEB_EMBEDDED", "IOS", "ANDROID", "TV"],
     });
 
     const headers = {
-      "Content-Type": format.mimeType?.split(";")[0] || "audio/mp4",
+      "Content-Type": format.mimeType?.split(";")[0] || "audio/webm",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "Accept-Ranges": "bytes",
@@ -142,6 +156,12 @@ export async function GET(request) {
     });
   } catch (error) {
     console.error("Stream failed", error);
-    return NextResponse.json({ error: "Stream failed" }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: "Stream failed",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 },
+    );
   }
 }
