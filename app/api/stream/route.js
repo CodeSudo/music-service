@@ -6,6 +6,7 @@ const ytmusic = new YTMusic();
 let isInitialized = false;
 
 // FIX 1: If deploying to Vercel, this forces the serverless function 
+// One More Try
 // to execute in Washington D.C., USA, bypassing the geo-block automatically.
 export const preferredRegion = 'iad1'; 
 export const dynamic = 'force-dynamic'; // Prevents caching of streaming endpoints
