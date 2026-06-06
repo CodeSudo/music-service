@@ -1,23 +1,29 @@
+// ---------------------------------------------------------------------------
+// MUST be first — patch fs.writeFile before ytdl-core is imported.
+// @distube/ytdl-core is archived and tries to write debug files (watch.html,
+// base.js) to process.cwd() when it hits parse errors. On Vercel cwd is
+// read-only, so the fs.writeFile call throws EROFS and completely masks the
+// real error. We no-op the write so the actual YouTube error propagates.
+// ---------------------------------------------------------------------------
+import fs from "fs";
+const _origWriteFile = fs.writeFile.bind(fs);
+fs.writeFile = (path, data, options, cb) => {
+  // Only suppress ytdl debug files; let everything else through
+  const p = typeof path === "string" ? path : "";
+  if (p.endsWith("-watch.html") || p.endsWith("-base.js") || p.endsWith("-player.js")) {
+    const done = typeof options === "function" ? options : cb;
+    if (typeof done === "function") done(null);
+    return;
+  }
+  return _origWriteFile(path, data, options, cb);
+};
+
 import { NextResponse } from "next/server";
 import ytdl from "@distube/ytdl-core";
 import YTMusic from "ytmusic-api";
-import { tmpdir } from "os";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// ---------------------------------------------------------------------------
-// FIX: @distube/ytdl-core tries to write debug files (watch.html, etc.) to
-// process.cwd() when it hits certain errors. On Vercel the root fs is
-// read-only — only /tmp is writable — so that write throws EROFS and masks
-// the real YouTube error. Redirecting cwd to /tmp lets ytdl write its debug
-// files without crashing, and the real error propagates correctly.
-// ---------------------------------------------------------------------------
-try {
-  process.chdir(tmpdir());
-} catch {
-  // already in /tmp or chdir not supported — safe to ignore
-}
 
 const ytmusic = new YTMusic();
 let isInitialized = false;
@@ -63,12 +69,10 @@ function choosePlayableAudioFormat(formats) {
 // FIX (P2): Handle suffix byte ranges (bytes=-N) correctly.
 function parseRangeHeader(rangeHeader, contentLength) {
   if (!rangeHeader?.startsWith("bytes=") || !contentLength) return null;
-
   const rangeValue = rangeHeader.slice("bytes=".length);
   const dashIndex = rangeValue.indexOf("-");
   const startText = rangeValue.slice(0, dashIndex);
   const endText = rangeValue.slice(dashIndex + 1);
-
   let start, end;
   if (startText === "") {
     const suffixLength = Number.parseInt(endText, 10);
@@ -79,10 +83,7 @@ function parseRangeHeader(rangeHeader, contentLength) {
     start = Number.parseInt(startText, 10);
     end = endText ? Number.parseInt(endText, 10) : contentLength - 1;
   }
-
-  if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || start >= contentLength || end < start) {
-    return null;
-  }
+  if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || start >= contentLength || end < start) return null;
   return { start, end: Math.min(end, contentLength - 1) };
 }
 
@@ -98,13 +99,11 @@ function createReadableStream(audioStream) {
 }
 
 function isGeoRestricted(error) {
-  const msg = error?.message?.toLowerCase() ?? "";
+  const msg = (error?.message ?? "").toLowerCase();
   const reason = (
     error?.playabilityStatus?.reason ??
-    error?.player_response?.playabilityStatus?.reason ??
-    ""
+    error?.player_response?.playabilityStatus?.reason ?? ""
   ).toLowerCase();
-
   return (
     msg.includes("not available in your country") ||
     msg.includes("not available in this country") ||
@@ -158,7 +157,7 @@ export async function GET(request) {
       infoOptions
     );
 
-    // Check playabilityStatus on the info object (non-throwing geo blocks)
+    // Check for non-throwing geo blocks in playabilityStatus
     const playability = info?.player_response?.playabilityStatus;
     if (playability?.status === "ERROR" || playability?.status === "UNPLAYABLE") {
       const reason = playability?.reason ?? "";
@@ -217,7 +216,7 @@ export async function GET(request) {
       },
     });
   } catch (error) {
-    console.error("Stream failed", error);
+    console.error("Stream error:", error?.message, error?.statusCode);
 
     if (isGeoRestricted(error)) {
       return NextResponse.json(
@@ -226,7 +225,6 @@ export async function GET(request) {
       );
     }
 
-    // Keep details in response until this is fully resolved
     return NextResponse.json(
       {
         error: "Stream failed",
