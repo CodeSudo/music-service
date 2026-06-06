@@ -1,33 +1,34 @@
 import { NextResponse } from "next/server";
 import ytdl from "@distube/ytdl-core";
 import YTMusic from "ytmusic-api";
+import { tmpdir } from "os";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// ---------------------------------------------------------------------------
+// FIX: @distube/ytdl-core tries to write debug files (watch.html, etc.) to
+// process.cwd() when it hits certain errors. On Vercel the root fs is
+// read-only — only /tmp is writable — so that write throws EROFS and masks
+// the real YouTube error. Redirecting cwd to /tmp lets ytdl write its debug
+// files without crashing, and the real error propagates correctly.
+// ---------------------------------------------------------------------------
+try {
+  process.chdir(tmpdir());
+} catch {
+  // already in /tmp or chdir not supported — safe to ignore
+}
+
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
-// ---------------------------------------------------------------------------
-// Build a proxy agent once at module load if PROXY_URL is set.
-//
-// This is the correct @distube/ytdl-core API for geo-restriction bypassing.
-// Set PROXY_URL in your Vercel env vars to route restricted streams through
-// a server in a permitted country (e.g. "http://user:pass@proxy-host:8080").
-// ---------------------------------------------------------------------------
 const proxyAgent = process.env.PROXY_URL
   ? ytdl.createProxyAgent({ uri: process.env.PROXY_URL })
   : null;
 
 async function ensureInitialized() {
   if (!isInitialized) {
-    // FIX: Removed GL:"US" / HL:"en" — setting a mismatched locale while
-    // using Indian session cookies causes YouTube to detect a spoofed origin
-    // and block geo-restricted-in-India content. Let ytmusic detect the
-    // locale from the cookies/server IP naturally.
-    await ytmusic.initialize({
-      cookies: process.env.YT_COOKIES,
-    });
+    await ytmusic.initialize({ cookies: process.env.YT_COOKIES });
     isInitialized = true;
   }
 }
@@ -49,21 +50,17 @@ function buildRequestHeaders() {
 
 function choosePlayableAudioFormat(formats) {
   const audioFormats = formats.filter(
-    (format) => format.hasAudio && !format.hasVideo && !format.isHLS
+    (f) => f.hasAudio && !f.hasVideo && !f.isHLS
   );
-
   return (
-    audioFormats.find((format) => format.container === "m4a") ||
-    audioFormats.find((format) => format.mimeType?.includes("audio/mp4")) ||
-    audioFormats.find((format) => format.codecs?.includes("mp4a")) ||
-    ytdl.chooseFormat(audioFormats, {
-      quality: "highestaudio",
-      filter: "audioonly",
-    })
+    audioFormats.find((f) => f.container === "m4a") ||
+    audioFormats.find((f) => f.mimeType?.includes("audio/mp4")) ||
+    audioFormats.find((f) => f.codecs?.includes("mp4a")) ||
+    ytdl.chooseFormat(audioFormats, { quality: "highestaudio", filter: "audioonly" })
   );
 }
 
-// FIX (P2, carried over): Handle suffix byte ranges (bytes=-N) correctly.
+// FIX (P2): Handle suffix byte ranges (bytes=-N) correctly.
 function parseRangeHeader(rangeHeader, contentLength) {
   if (!rangeHeader?.startsWith("bytes=") || !contentLength) return null;
 
@@ -73,9 +70,7 @@ function parseRangeHeader(rangeHeader, contentLength) {
   const endText = rangeValue.slice(dashIndex + 1);
 
   let start, end;
-
   if (startText === "") {
-    // Suffix range: bytes=-N  →  last N bytes
     const suffixLength = Number.parseInt(endText, 10);
     if (Number.isNaN(suffixLength) || suffixLength <= 0) return null;
     start = Math.max(0, contentLength - suffixLength);
@@ -85,16 +80,9 @@ function parseRangeHeader(rangeHeader, contentLength) {
     end = endText ? Number.parseInt(endText, 10) : contentLength - 1;
   }
 
-  if (
-    Number.isNaN(start) ||
-    Number.isNaN(end) ||
-    start < 0 ||
-    start >= contentLength ||
-    end < start
-  ) {
+  if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || start >= contentLength || end < start) {
     return null;
   }
-
   return { start, end: Math.min(end, contentLength - 1) };
 }
 
@@ -103,33 +91,19 @@ function createReadableStream(audioStream) {
     start(controller) {
       audioStream.on("data", (chunk) => controller.enqueue(chunk));
       audioStream.on("end", () => controller.close());
-      audioStream.on("error", (error) => controller.error(error));
+      audioStream.on("error", (err) => controller.error(err));
     },
-    cancel() {
-      audioStream.destroy();
-    },
+    cancel() { audioStream.destroy(); },
   });
 }
 
-// ---------------------------------------------------------------------------
-// Detect whether a ytdl error is a geo-restriction.
-//
-// ytdl-core surfaces geo blocks in several ways depending on which player
-// client responded:
-//   - error.message contains phrases like "not available in your country"
-//   - error.message is just "Video unavailable" (no country mention)
-//   - error has a .statusCode of 410 (Gone) for geo-blocked content
-//   - the thrown object carries a playabilityStatus.status of "ERROR" or
-//     "UNPLAYABLE" with reason mentioning country/region
-// We check all of them and also expose the raw message in the 500 so you
-// can see exactly what string needs to be matched.
-// ---------------------------------------------------------------------------
 function isGeoRestricted(error) {
   const msg = error?.message?.toLowerCase() ?? "";
-  const reason =
-    error?.playabilityStatus?.reason?.toLowerCase() ??
-    error?.player_response?.playabilityStatus?.reason?.toLowerCase() ??
-    "";
+  const reason = (
+    error?.playabilityStatus?.reason ??
+    error?.player_response?.playabilityStatus?.reason ??
+    ""
+  ).toLowerCase();
 
   return (
     msg.includes("not available in your country") ||
@@ -140,7 +114,6 @@ function isGeoRestricted(error) {
     reason.includes("country") ||
     reason.includes("region") ||
     reason.includes("not available") ||
-    // 410 Gone is what ytdl-core throws for geo-blocked videos on some clients
     error?.statusCode === 410
   );
 }
@@ -159,10 +132,7 @@ export async function GET(request) {
         .filter((item) => item.type === "SONG" || item.type === "VIDEO")
         .slice(0, 10);
       return NextResponse.json(filtered, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "no-store",
-        },
+        headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
       });
     } catch (error) {
       console.error("Search failed", error);
@@ -171,19 +141,12 @@ export async function GET(request) {
   }
 
   if (!videoId) {
-    return NextResponse.json(
-      { error: "Missing query or videoId" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing query or videoId" }, { status: 400 });
   }
 
   // ── Stream ────────────────────────────────────────────────────────────────
   try {
     const requestHeaders = buildRequestHeaders();
-
-    // Build getInfo options. If a proxy agent exists, use it — this routes
-    // the metadata fetch (and therefore the stream URL resolution) through a
-    // country where the content is available.
     const infoOptions = {
       requestOptions: { headers: requestHeaders },
       playerClients: ["WEB_EMBEDDED", "IOS", "ANDROID", "TV"],
@@ -195,31 +158,21 @@ export async function GET(request) {
       infoOptions
     );
 
-    // Check if YouTube itself flagged the video as region-locked
-    const playability =
-      info?.player_response?.playabilityStatus;
-    if (
-      playability?.status === "ERROR" ||
-      playability?.status === "UNPLAYABLE"
-    ) {
+    // Check playabilityStatus on the info object (non-throwing geo blocks)
+    const playability = info?.player_response?.playabilityStatus;
+    if (playability?.status === "ERROR" || playability?.status === "UNPLAYABLE") {
       const reason = playability?.reason ?? "";
-      if (
-        reason.toLowerCase().includes("country") ||
-        reason.toLowerCase().includes("region")
-      ) {
+      if (reason.toLowerCase().includes("country") || reason.toLowerCase().includes("region")) {
         return NextResponse.json(
           { error: "geo_restricted", message: reason },
-          { status: 451 } // 451 = Unavailable For Legal Reasons
+          { status: 451 }
         );
       }
     }
 
     const format = choosePlayableAudioFormat(info.formats);
     if (!format) {
-      return NextResponse.json(
-        { error: "No playable audio format found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "No playable audio format found" }, { status: 404 });
     }
 
     const contentLength = format.contentLength
@@ -266,18 +219,14 @@ export async function GET(request) {
   } catch (error) {
     console.error("Stream failed", error);
 
-    // Surface geo-restriction as a distinct error so the UI can show a
-    // meaningful message rather than a generic failure.
     if (isGeoRestricted(error)) {
       return NextResponse.json(
-        {
-          error: "geo_restricted",
-          message: "This song isn't available in your region.",
-        },
+        { error: "geo_restricted", message: "This song isn't available in your region." },
         { status: 451 }
       );
     }
 
+    // Keep details in response until this is fully resolved
     return NextResponse.json(
       {
         error: "Stream failed",
