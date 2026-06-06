@@ -1,26 +1,12 @@
-// ---------------------------------------------------------------------------
-// MUST be first — patch fs.writeFile before ytdl-core is imported.
-// @distube/ytdl-core is archived and tries to write debug files (watch.html,
-// base.js) to process.cwd() when it hits parse errors. On Vercel cwd is
-// read-only, so the fs.writeFile call throws EROFS and completely masks the
-// real error. We no-op the write so the actual YouTube error propagates.
-// ---------------------------------------------------------------------------
-import fs from "fs";
-const _origWriteFile = fs.writeFile.bind(fs);
-fs.writeFile = (path, data, options, cb) => {
-  // Only suppress ytdl debug files; let everything else through
-  const p = typeof path === "string" ? path : "";
-  if (p.endsWith("-watch.html") || p.endsWith("-base.js") || p.endsWith("-player.js")) {
-    const done = typeof options === "function" ? options : cb;
-    if (typeof done === "function") done(null);
-    return;
-  }
-  return _origWriteFile(path, data, options, cb);
-};
-
 import { NextResponse } from "next/server";
-import ytdl from "@distube/ytdl-core";
+import { createRequire } from "module";
 import YTMusic from "ytmusic-api";
+
+// Import ytdl through the CJS shim that patches fs.writeFile first.
+// Direct ESM import of @distube/ytdl-core hoists before any patch code runs,
+// so the EROFS debug-file write can't be intercepted that way.
+const require = createRequire(import.meta.url);
+const ytdl = require("./ytdl-patched.cjs");
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,7 +52,6 @@ function choosePlayableAudioFormat(formats) {
   );
 }
 
-// FIX (P2): Handle suffix byte ranges (bytes=-N) correctly.
 function parseRangeHeader(rangeHeader, contentLength) {
   if (!rangeHeader?.startsWith("bytes=") || !contentLength) return null;
   const rangeValue = rangeHeader.slice("bytes=".length);
@@ -122,7 +107,6 @@ export async function GET(request) {
   const videoId = searchParams.get("videoId");
   const query = searchParams.get("query");
 
-  // ── Search ────────────────────────────────────────────────────────────────
   if (query) {
     try {
       await ensureInitialized();
@@ -143,7 +127,6 @@ export async function GET(request) {
     return NextResponse.json({ error: "Missing query or videoId" }, { status: 400 });
   }
 
-  // ── Stream ────────────────────────────────────────────────────────────────
   try {
     const requestHeaders = buildRequestHeaders();
     const infoOptions = {
@@ -157,7 +140,6 @@ export async function GET(request) {
       infoOptions
     );
 
-    // Check for non-throwing geo blocks in playabilityStatus
     const playability = info?.player_response?.playabilityStatus;
     if (playability?.status === "ERROR" || playability?.status === "UNPLAYABLE") {
       const reason = playability?.reason ?? "";
@@ -216,7 +198,7 @@ export async function GET(request) {
       },
     });
   } catch (error) {
-    console.error("Stream error:", error?.message, error?.statusCode);
+    console.error("Stream error:", error?.message);
 
     if (isGeoRestricted(error)) {
       return NextResponse.json(
