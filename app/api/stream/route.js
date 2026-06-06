@@ -112,18 +112,36 @@ function createReadableStream(audioStream) {
 }
 
 // ---------------------------------------------------------------------------
-// Detect whether a ytdl error is a geo-restriction so we can surface a
-// meaningful message to the client instead of a generic 500.
+// Detect whether a ytdl error is a geo-restriction.
+//
+// ytdl-core surfaces geo blocks in several ways depending on which player
+// client responded:
+//   - error.message contains phrases like "not available in your country"
+//   - error.message is just "Video unavailable" (no country mention)
+//   - error has a .statusCode of 410 (Gone) for geo-blocked content
+//   - the thrown object carries a playabilityStatus.status of "ERROR" or
+//     "UNPLAYABLE" with reason mentioning country/region
+// We check all of them and also expose the raw message in the 500 so you
+// can see exactly what string needs to be matched.
 // ---------------------------------------------------------------------------
 function isGeoRestricted(error) {
   const msg = error?.message?.toLowerCase() ?? "";
+  const reason =
+    error?.playabilityStatus?.reason?.toLowerCase() ??
+    error?.player_response?.playabilityStatus?.reason?.toLowerCase() ??
+    "";
+
   return (
     msg.includes("not available in your country") ||
+    msg.includes("not available in this country") ||
+    msg.includes("uploader has not made this video available") ||
     msg.includes("geo") ||
     msg.includes("region") ||
-    msg.includes("uploader has not made this video available") ||
-    // ytdl-core sometimes just says "Video unavailable" for geo-blocks
-    (msg.includes("video unavailable") && msg.includes("country"))
+    reason.includes("country") ||
+    reason.includes("region") ||
+    reason.includes("not available") ||
+    // 410 Gone is what ytdl-core throws for geo-blocked videos on some clients
+    error?.statusCode === 410
   );
 }
 
@@ -260,6 +278,14 @@ export async function GET(request) {
       );
     }
 
-    return NextResponse.json({ error: "Stream failed" }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: "Stream failed",
+        details: error?.message ?? String(error),
+        playabilityStatus: error?.playabilityStatus?.status ?? null,
+        playabilityReason: error?.playabilityStatus?.reason ?? null,
+      },
+      { status: 500 }
+    );
   }
 }
