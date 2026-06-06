@@ -1,174 +1,276 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
 
-export default function MusicPlayer() {
+import { useState, useRef, useCallback } from "react";
+
+export default function MusicPage() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [loading, setLoading] = useState(false);
-  const playerRef = useRef(null);
-  const watchdogRef = useRef(null);
+  const [status, setStatus] = useState("idle");
+  const [statusMsg, setStatusMsg] = useState("");
 
-  // 1. Function to (Re)Initialize the Player
-  const initPlayer = (videoId = '') => {
-    // If player exists, destroy it to clear memory leaks
-    if (playerRef.current && typeof playerRef.current.destroy === 'function') {
-      try { playerRef.current.destroy(); } catch (e) {}
-    }
+  const audioRef = useRef(null);
+  const currentIndexRef = useRef(-1);
+  const queueRef = useRef([]);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 2;
 
-    playerRef.current = new window.YT.Player('hidden-player', {
-      height: '0',
-      width: '0',
-      videoId: videoId,
-      playerVars: { 'autoplay': 1, 'controls': 0, 'origin': window.location.origin },
-      events: {
-        'onReady': (event) => {
-          if (videoId) event.target.playVideo();
-        },
-        'onStateChange': (event) => {
-          // Clear watchdog if song actually starts playing
-          if (event.data === window.YT.PlayerState.PLAYING) {
-            clearTimeout(watchdogRef.current);
-          }
-          // Handle Auto-Next
-          if (event.data === window.YT.PlayerState.ENDED) {
-            handleAutoNext();
-          }
-        },
-        'onError': () => {
-          console.log("Player Error - Attempting Reset...");
-          handleFreezeReset();
-        }
-      }
-    });
-  };
-
-  useEffect(() => {
-    if (!window.YT) {
-      const tag = document.createElement('script');
-      tag.src = "https://www.youtube.com/iframe_api";
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-    }
-    window.onYouTubeIframeAPIReady = () => initPlayer();
-  }, []);
-
-  // 2. The "Freeze Reset" Logic
-  const handleFreezeReset = (targetIndex, currentQueue) => {
-    console.warn("Freeze detected. Re-initializing player...");
-    const song = currentQueue[targetIndex];
-    initPlayer(song.videoId);
+  const syncRefs = (newQueue, newIndex) => {
+    queueRef.current = newQueue;
+    currentIndexRef.current = newIndex;
   };
 
   const search = async () => {
-    if (!query) return;
-    setLoading(true);
+    if (!query.trim()) return;
+    setStatusMsg("Searching…");
     try {
-      const res = await fetch(`/api/stream?query=${encodeURIComponent(query)}`);
+      const res = await fetch(
+        `/api/stream?query=${encodeURIComponent(query)}`
+      );
       const data = await res.json();
       setResults(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error("Search failed", err);
-    } finally {
-      setLoading(false);
+      setStatusMsg("");
+    } catch {
+      setStatusMsg("Search failed.");
     }
   };
 
-  const playFromQueue = (index, currentQueue) => {
-    if (index >= 0 && index < currentQueue.length) {
-      const song = currentQueue[index];
-      setCurrentIndex(index);
+  const playFromQueue = useCallback((index, targetQueue) => {
+    const q = targetQueue ?? queueRef.current;
+    const track = q[index];
+    if (!track || !audioRef.current) return;
 
-      // Start Watchdog: If song doesn't play in 3s, reset the player
-      clearTimeout(watchdogRef.current);
-      watchdogRef.current = setTimeout(() => {
-        handleFreezeReset(index, currentQueue);
-      }, 3000);
+    retryCountRef.current = 0;
+    syncRefs(q, index);
+    setCurrentIndex(index);
+    setStatus("loading");
+    setStatusMsg(`Loading: ${track.name}`);
 
-      if (playerRef.current && playerRef.current.loadVideoById) {
-        playerRef.current.loadVideoById(song.videoId);
-        playerRef.current.playVideo();
-      } else {
-        initPlayer(song.videoId);
+    audioRef.current.src = `/api/stream?videoId=${track.videoId}`;
+    audioRef.current.load();
+    audioRef.current.play().catch(() => {});
+  }, []);
+
+  const retryPlayback = useCallback(
+    (index, targetQueue) => {
+      if (retryCountRef.current >= MAX_RETRIES) {
+        setStatus("error");
+        setStatusMsg("Playback failed. Skipping…");
+        setTimeout(() => handleAutoNext(), 2000);
+        return;
       }
-    }
-  };
+      retryCountRef.current += 1;
+      setTimeout(() => playFromQueue(index, targetQueue), 1500);
+    },
+    [playFromQueue]
+  );
 
-  const handleAutoNext = () => {
-    setQueue((prevQueue) => {
-      setCurrentIndex((prevIndex) => {
-        const nextIndex = prevIndex + 1;
-        if (nextIndex < prevQueue.length) {
-          playFromQueue(nextIndex, prevQueue);
-          return nextIndex;
+  const handleAutoNext = useCallback(() => {
+    const q = queueRef.current;
+    const next = currentIndexRef.current + 1;
+    if (next < q.length) {
+      playFromQueue(next, q);
+    } else {
+      syncRefs(q, -1);
+      setCurrentIndex(-1);
+      setStatus("idle");
+      setStatusMsg("Queue finished.");
+    }
+  }, [playFromQueue]);
+
+  // FIX (geo): Intercept the audio element's error event and check whether
+  // the server returned a 451 (geo-restricted) before doing a retry.
+  const handleAudioError = useCallback(async () => {
+    const src = audioRef.current?.src;
+    if (src) {
+      try {
+        const res = await fetch(src, { method: "HEAD" });
+        if (res.status === 451) {
+          const track = queueRef.current[currentIndexRef.current];
+          setStatus("error");
+          setStatusMsg(
+            `"${track?.name ?? "This song"}" isn't available in your region. Skipping…`
+          );
+          setTimeout(() => handleAutoNext(), 3000);
+          return;
         }
-        return prevIndex;
-      });
-      return prevQueue;
-    });
-  };
-
-  const instantPlay = (song) => {
-    const newQueue = [song];
-    setQueue(newQueue);
-    playFromQueue(0, newQueue);
-  };
-
-  const addToQueue = (song) => {
-    setQueue((prev) => {
-      const newQueue = [...prev, song];
-      if (currentIndex === -1) {
-        playFromQueue(0, newQueue);
+      } catch {
+        // HEAD request failed — fall through to normal retry
       }
-      return newQueue;
-    });
+    }
+    retryPlayback(currentIndexRef.current, queueRef.current);
+  }, [retryPlayback, handleAutoNext]);
+
+  // FIX (P1): Play the newly added track, not index 0, when queue was idle.
+  const addToQueue = (track) => {
+    const newQueue = [...queueRef.current, track];
+    const addedIndex = newQueue.length - 1;
+    syncRefs(newQueue, currentIndexRef.current);
+    setQueue([...newQueue]);
+
+    if (currentIndexRef.current === -1) {
+      playFromQueue(addedIndex, newQueue);
+    }
   };
+
+  const clearQueue = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    syncRefs([], -1);
+    setQueue([]);
+    setCurrentIndex(-1);
+    setStatus("idle");
+    setStatusMsg("");
+  };
+
+  const currentTrack =
+    currentIndex >= 0 ? queueRef.current[currentIndex] : null;
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '600px', margin: 'auto', background: '#111', color: '#fff', minHeight: '100vh' }}>
-      <h1>🎵 Stable Stream</h1>
-      {/* Container must stay visible for initPlayer to find it, but 0px size */}
-      <div id="hidden-player" style={{ position: 'absolute', top: '-1000px' }}></div>
+    <main
+      style={{
+        fontFamily: "sans-serif",
+        maxWidth: 720,
+        margin: "0 auto",
+        padding: "2rem 1rem",
+      }}
+    >
+      <h1 style={{ fontSize: "1.5rem", marginBottom: "1rem" }}>
+        Stable Stream Pro
+      </h1>
 
-      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-        <input 
-          value={query} 
+      <div style={{ display: "flex", gap: 8, marginBottom: "1rem" }}>
+        <input
+          value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && search()}
-          placeholder="Search..."
-          style={{ flex: 1, padding: '10px', borderRadius: '8px', color: '#000' }}
+          onKeyDown={(e) => e.key === "Enter" && search()}
+          placeholder="Search for a song…"
+          style={{ flex: 1, padding: "0.5rem", fontSize: "1rem" }}
         />
-        <button onClick={search} disabled={loading}>{loading ? '...' : 'Search'}</button>
+        <button
+          onClick={search}
+          style={{ padding: "0.5rem 1rem", cursor: "pointer" }}
+        >
+          Search
+        </button>
       </div>
 
-      {currentIndex !== -1 && queue[currentIndex] && (
-        <div style={{ background: '#333', padding: '15px', borderRadius: '12px', marginBottom: '20px', border: '1px solid #1db954' }}>
-          <p><strong>Playing:</strong> {queue[currentIndex].name}</p>
-          <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-            <button onClick={() => playerRef.current?.pauseVideo()}>Pause</button>
-            <button onClick={() => playerRef.current?.playVideo()}>Play</button>
-            <button onClick={handleAutoNext}>Skip</button>
-            <button onClick={() => { setQueue([]); setCurrentIndex(-1); playerRef.current?.stopVideo(); }} style={{ background: '#ff4444', color: '#fff', border: 'none', borderRadius: '4px' }}>Clear</button>
-          </div>
+      {statusMsg && (
+        <p
+          style={{
+            color: status === "error" ? "#c00" : "#555",
+            marginBottom: "0.75rem",
+            fontSize: "0.9rem",
+          }}
+        >
+          {statusMsg}
+        </p>
+      )}
+
+      {currentTrack && (
+        <div
+          style={{
+            background: "#f0f4ff",
+            borderRadius: 8,
+            padding: "0.75rem 1rem",
+            marginBottom: "1rem",
+          }}
+        >
+          <strong>Now playing:</strong> {currentTrack.name}
+          {currentTrack.artist?.name && ` — ${currentTrack.artist.name}`}
         </div>
       )}
 
-      <ul style={{ listStyle: 'none', padding: 0 }}>
-        {results.map((song) => (
-          <li key={song.videoId} 
-              style={{ padding: '10px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div onClick={() => instantPlay(song)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-              <img src={song.thumbnails?.[0]?.url} width="40" height="40" style={{ borderRadius: '4px' }} alt="" />
-              <div>
-                <div style={{ fontWeight: 'bold' }}>{song.name}</div>
-                <div style={{ fontSize: '0.8rem', color: '#aaa' }}>{song.artists?.[0]?.name}</div>
-              </div>
+      <audio
+        ref={audioRef}
+        onPlay={() => {
+          setStatus("playing");
+          setStatusMsg(
+            `Playing: ${queueRef.current[currentIndexRef.current]?.name ?? ""}`
+          );
+        }}
+        onPause={() => setStatus("paused")}
+        onEnded={handleAutoNext}
+        onError={handleAudioError}
+        controls
+        style={{ width: "100%", marginBottom: "1rem" }}
+      />
+
+      {queue.length > 0 && (
+        <div style={{ marginBottom: "1rem" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 6,
+            }}
+          >
+            <strong>Queue ({queue.length})</strong>
+            <button
+              onClick={clearQueue}
+              style={{ fontSize: "0.8rem", cursor: "pointer", color: "#c00" }}
+            >
+              Clear
+            </button>
+          </div>
+          {queue.map((track, i) => (
+            <div
+              key={`${track.videoId}-${i}`}
+              onClick={() => playFromQueue(i)}
+              style={{
+                padding: "0.4rem 0.6rem",
+                cursor: "pointer",
+                borderRadius: 4,
+                background: i === currentIndex ? "#dde8ff" : "transparent",
+                fontWeight: i === currentIndex ? 600 : 400,
+              }}
+            >
+              {i + 1}. {track.name}
+              {track.artist?.name && (
+                <span style={{ color: "#666", fontWeight: 400 }}>
+                  {" "}
+                  — {track.artist.name}
+                </span>
+              )}
             </div>
-            <button onClick={() => addToQueue(song)} style={{ padding: '5px 10px', background: '#1db954', color: '#fff', border: 'none', borderRadius: '4px' }}>+ Queue</button>
-          </li>
-        ))}
-      </ul>
-    </div>
+          ))}
+        </div>
+      )}
+
+      {results.length > 0 && (
+        <div>
+          <strong style={{ display: "block", marginBottom: 6 }}>Results</strong>
+          {results.map((track) => (
+            <div
+              key={track.videoId}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "0.4rem 0",
+                borderBottom: "1px solid #eee",
+              }}
+            >
+              <span>
+                {track.name}
+                {track.artist?.name && (
+                  <span style={{ color: "#666" }}> — {track.artist.name}</span>
+                )}
+              </span>
+              <button
+                onClick={() => addToQueue(track)}
+                style={{ marginLeft: 8, cursor: "pointer", fontSize: "0.85rem" }}
+              >
+                + Queue
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </main>
   );
 }
