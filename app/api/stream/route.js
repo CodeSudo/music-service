@@ -5,6 +5,11 @@ import YTMusic from 'ytmusic-api';
 const ytmusic = new YTMusic();
 let isInitialized = false;
 
+// FIX 1: If deploying to Vercel, this forces the serverless function 
+// to execute in Washington D.C., USA, bypassing the geo-block automatically.
+export const preferredRegion = 'iad1'; 
+export const dynamic = 'force-dynamic'; // Prevents caching of streaming endpoints
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const videoId = searchParams.get('videoId');
@@ -39,7 +44,7 @@ export async function GET(request) {
       // 2. Select audio format
       const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
 
-      // 3. Create a Node.js PassThrough stream to bridge ytdl and NextResponse
+      // 3. Create a Node.js PassThrough stream
       const audioStream = ytdl(videoUrl, {
         format: format,
         requestOptions: {
@@ -61,12 +66,20 @@ export async function GET(request) {
 
       return new NextResponse(readableStream, {
         headers: {
-          'Content-Type': 'audio/mpeg',
+          // FIX 2: Do not hardcode 'audio/mpeg'. ytdl usually returns 'audio/webm' or 'audio/mp4'. 
+          // Hardcoding mpeg can cause Safari and iOS devices to fail playback.
+          'Content-Type': format.mimeType || 'audio/webm',
           'Transfer-Encoding': 'chunked',
+          
+          // FIX 3: Essential CORS headers. If your frontend requests this from a different 
+          // domain or port, the browser will block the stream without these.
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         },
       });
     } catch (err) {
-      console.error(err);
+      console.error("Streaming error:", err);
       return NextResponse.json({ error: "Streaming failed" }, { status: 500 });
     }
   }
