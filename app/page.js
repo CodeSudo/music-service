@@ -7,59 +7,20 @@ export default function MusicPlayer() {
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
-  const playerRef = useRef(null);
-  const watchdogRef = useRef(null);
+  const audioRef = useRef(null);
 
-  // 1. Function to (Re)Initialize the Player
-  const initPlayer = (videoId = '') => {
-    // If player exists, destroy it to clear memory leaks
-    if (playerRef.current && typeof playerRef.current.destroy === 'function') {
-      try { playerRef.current.destroy(); } catch (e) {}
-    }
-
-    playerRef.current = new window.YT.Player('hidden-player', {
-      height: '0',
-      width: '0',
-      videoId: videoId,
-      playerVars: { 'autoplay': 1, 'controls': 0, 'origin': window.location.origin },
-      events: {
-        'onReady': (event) => {
-          if (videoId) event.target.playVideo();
-        },
-        'onStateChange': (event) => {
-          // Clear watchdog if song actually starts playing
-          if (event.data === window.YT.PlayerState.PLAYING) {
-            clearTimeout(watchdogRef.current);
-          }
-          // Handle Auto-Next
-          if (event.data === window.YT.PlayerState.ENDED) {
-            handleAutoNext();
-          }
-        },
-        'onError': () => {
-          console.log("Player Error - Attempting Reset...");
-          handleFreezeReset();
-        }
-      }
-    });
-  };
-
+  // Initialize audio element
   useEffect(() => {
-    if (!window.YT) {
-      const tag = document.createElement('script');
-      tag.src = "https://www.youtube.com/iframe_api";
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.addEventListener('ended', handleAutoNext);
     }
-    window.onYouTubeIframeAPIReady = () => initPlayer();
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.removeEventListener('ended', handleAutoNext);
+      }
+    };
   }, []);
-
-  // 2. The "Freeze Reset" Logic
-  const handleFreezeReset = (targetIndex, currentQueue) => {
-    console.warn("Freeze detected. Re-initializing player...");
-    const song = currentQueue[targetIndex];
-    initPlayer(song.videoId);
-  };
 
   const search = async () => {
     if (!query) return;
@@ -67,7 +28,7 @@ export default function MusicPlayer() {
     try {
       const res = await fetch(`/api/stream?query=${encodeURIComponent(query)}`);
       const data = await res.json();
-      setResults(Array.isArray(data) ? data : []);
+      setResults(Array.isArray(data.results) ? data.results : []);
     } catch (err) {
       console.error("Search failed", err);
     } finally {
@@ -75,51 +36,43 @@ export default function MusicPlayer() {
     }
   };
 
-  const playFromQueue = (index, currentQueue) => {
-    if (index >= 0 && index < currentQueue.length) {
-      const song = currentQueue[index];
+  const playSong = (song) => {
+    if (audioRef.current && song.videoId) {
+      audioRef.current.src = `/api/stream?videoId=${song.videoId}`;
+      audioRef.current.play();
+    }
+  };
+
+  const playFromQueue = (index) => {
+    if (index >= 0 && index < queue.length) {
       setCurrentIndex(index);
-
-      // Start Watchdog: If song doesn't play in 3s, reset the player
-      clearTimeout(watchdogRef.current);
-      watchdogRef.current = setTimeout(() => {
-        handleFreezeReset(index, currentQueue);
-      }, 3000);
-
-      if (playerRef.current && playerRef.current.loadVideoById) {
-        playerRef.current.loadVideoById(song.videoId);
-        playerRef.current.playVideo();
-      } else {
-        initPlayer(song.videoId);
-      }
+      playSong(queue[index]);
     }
   };
 
   const handleAutoNext = () => {
-    setQueue((prevQueue) => {
-      setCurrentIndex((prevIndex) => {
-        const nextIndex = prevIndex + 1;
-        if (nextIndex < prevQueue.length) {
-          playFromQueue(nextIndex, prevQueue);
-          return nextIndex;
-        }
-        return prevIndex;
-      });
-      return prevQueue;
+    setCurrentIndex((prev) => {
+      const nextIndex = prev + 1;
+      if (nextIndex < queue.length) {
+        playFromQueue(nextIndex);
+      }
+      return nextIndex;
     });
   };
 
   const instantPlay = (song) => {
     const newQueue = [song];
     setQueue(newQueue);
-    playFromQueue(0, newQueue);
+    setCurrentIndex(0);
+    playSong(song);
   };
 
   const addToQueue = (song) => {
     setQueue((prev) => {
       const newQueue = [...prev, song];
       if (currentIndex === -1) {
-        playFromQueue(0, newQueue);
+        setCurrentIndex(0);
+        playSong(song);
       }
       return newQueue;
     });
@@ -127,9 +80,7 @@ export default function MusicPlayer() {
 
   return (
     <div style={{ padding: '2rem', maxWidth: '600px', margin: 'auto', background: '#111', color: '#fff', minHeight: '100vh' }}>
-      <h1>🎵 Stable Stream</h1>
-      {/* Container must stay visible for initPlayer to find it, but 0px size */}
-      <div id="hidden-player" style={{ position: 'absolute', top: '-1000px' }}></div>
+      <h1>🎵 Music Stream</h1>
 
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
         <input 
@@ -146,10 +97,20 @@ export default function MusicPlayer() {
         <div style={{ background: '#333', padding: '15px', borderRadius: '12px', marginBottom: '20px', border: '1px solid #1db954' }}>
           <p><strong>Playing:</strong> {queue[currentIndex].name}</p>
           <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-            <button onClick={() => playerRef.current?.pauseVideo()}>Pause</button>
-            <button onClick={() => playerRef.current?.playVideo()}>Play</button>
+            <button onClick={() => audioRef.current?.pause()}>Pause</button>
+            <button onClick={() => audioRef.current?.play()}>Play</button>
             <button onClick={handleAutoNext}>Skip</button>
-            <button onClick={() => { setQueue([]); setCurrentIndex(-1); playerRef.current?.stopVideo(); }} style={{ background: '#ff4444', color: '#fff', border: 'none', borderRadius: '4px' }}>Clear</button>
+            <button 
+              onClick={() => { 
+                setQueue([]); 
+                setCurrentIndex(-1); 
+                audioRef.current.pause();
+                audioRef.current.src = '';
+              }} 
+              style={{ background: '#ff4444', color: '#fff', border: 'none', borderRadius: '4px' }}
+            >
+              Clear
+            </button>
           </div>
         </div>
       )}
